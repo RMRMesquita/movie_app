@@ -1,0 +1,123 @@
+---
+- name: Deploy Movie App to AWS
+  hosts: localhost
+  gather_facts: no
+  vars:
+    aws_region: "us-east-1"  # Change as needed
+    rds_instance_identifier: "movie-db"
+    rds_db_name: "movie_database"
+    rds_username: "movie_user"
+    rds_password: "movie_password"
+    ecr_repository_name: "movie_app"
+    ecs_cluster_name: "movie-cluster"
+    app_image_tag: "latest"
+    vpc_id: "vpc-xxxxxxxx"  # Replace with your VPC ID
+    subnet_id: "subnet-xxxxxxxx"  # Replace with your Subnet ID
+    security_group_id: "sg-xxxxxxxx"  # Replace with your Security Group ID
+    secret_key: "{{ lookup('env', 'SECRET_KEY') }}"  # Use environment variable for secret key
+    jwt_secret_key: "{{ lookup('env', 'JWT_SECRET_KEY') }}"  # Use environment variable for JWT secret key
+
+  tasks:
+    - name: Create RDS PostgreSQL instance
+      amazon.aws.rds_instance:
+        db_instance_identifier: "{{ rds_instance_identifier }}"
+        engine: "postgres"
+        master_username: "{{ rds_username }}"
+        master_user_password: "{{ rds_password }}"
+        db_name: "{{ rds_db_name }}"
+        instance_class: "db.t3.micro"
+        allocated_storage: 20
+        vpc_security_group_ids:
+          - "{{ security_group_id }}"
+        region: "{{ aws_region }}"
+        state: present
+      register: rds
+
+    - name: Wait for RDS instance to become available
+      amazon.aws.rds_instance_info:
+        db_instance_identifier: "{{ rds_instance_identifier }}"
+        region: "{{ aws_region }}"
+      register: rds_info
+      until: rds_info.instances[0].db_instance_status == "available"
+      retries: 10
+      delay: 30
+
+    - name: Create ECR repository
+      amazon.aws.ecr_repository:
+        name: "{{ ecr_repository_name }}"
+        region: "{{ aws_region }}"
+        state: present
+
+    - name: Authenticate Docker to ECR
+      amazon.aws.ecr_login:
+        region: "{{ aws_region }}"
+
+    - name: Tag and push Docker image
+      shell: |
+        docker tag movie_app:{{ app_image_tag }} {{ rds.username }}.dkr.ecr.{{ aws_region }}.amazonaws.com/{{ ecr_repository_name }}:{{ app_image_tag }}
+        docker push {{ rds.username }}.dkr.ecr.{{ aws_region }}.amazonaws.com/{{ ecr_repository_name }}:{{ app_image_tag }}
+      args:
+        chdir: /path/to/your/docker/project  # Change to the path where your Dockerfile is located
+      when: rds_info.instances is defined
+
+    - name: Create ECS cluster
+      amazon.aws.ecs_cluster:
+        name: "{{ ecs_cluster_name }}"
+        region: "{{ aws_region }}"
+        state: present
+
+    - name: Create ECS task definition
+      amazon.aws.ecs_taskdefinition:
+        family: "{{ ecs_cluster_name }}-task"
+        container_definitions: |
+          [
+            {
+              "name": "app",
+              "image": "{{ rds.username }}.dkr.ecr.{{ aws_region }}.amazonaws.com/{{ ecr_repository_name }}:{{ app_image_tag }}",
+              "essential": true,
+              "memory": 1024,
+              "cpu": 512,
+              "portMappings": [
+                {
+                  "containerPort": 5000,
+                  "hostPort": 5000
+                }
+              ],
+              "environment": [
+                {
+                  "name": "FLASK_ENV",
+                  "value": "production"
+                },
+                {
+                  "name": "DATABASE_URL",
+                  "value": "postgresql://{{ rds_username }}:{{ rds_password }}@{{ rds_info.instances[0].endpoint }}:5432/{{ rds_db_name }}"
+                },
+                {
+                  "name": "SECRET_KEY",
+                  "value": "{{ secret_key }}"
+                },
+                {
+                  "name": "JWT_SECRET_KEY",
+                  "value": "{{ jwt_secret_key }}"
+                }
+              ]
+            }
+          ]
+        region: "{{ aws_region }}"
+
+    - name: Run ECS service
+      amazon.aws.ecs_service:
+        cluster: "{{ ecs_cluster_name }}"
+        service_name: "{{ ecs_cluster_name }}-service"
+        task_definition: "{{ ecs_cluster_name }}-task"
+        desired_count: 1
+        launch_type: "FARGATE"
+        network_configuration:
+          awsvpc_configuration:
+            subnets:
+              - "{{ subnet_id }}"
+            security_groups:
+              - "{{ security_group_id }}"
+            assign_public_ip: ENABLED
+        region: "{{ aws_region }}"
+        state: present

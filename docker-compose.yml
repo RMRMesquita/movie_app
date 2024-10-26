@@ -1,0 +1,22 @@
+version: '3.8'
+
+services:
+  app:
+    image: <aws_account_id>.dkr.ecr.<region>.amazonaws.com/movie_app:latest
+    environment:
+      FLASK_ENV: production
+      DATABASE_URL: postgresql://{{ rds_username }}:{{ rds_password }}@<RDS_ENDPOINT>:5432/movie_database
+      SECRET_KEY: ${SECRET_KEY}
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY}
+    ports:
+      - "5000:5000"
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: '1024M'
+
+networks:
+  default:
+    external:
+      name: my-ecs-network
